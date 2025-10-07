@@ -1,4 +1,3 @@
-import type { ReactNode } from 'react';
 import {
   Dialog,
   DialogContent,
@@ -6,6 +5,7 @@ import {
   DialogTitle,
   DialogTrigger,
 } from '@/components/ui/dialog';
+import { useState, type ReactNode } from 'react';
 import {
   useForm,
   type FieldError,
@@ -18,15 +18,23 @@ import {
 import { Button } from '@/components/ui/button';
 import {
   Form,
+  FormControl,
   FormField,
   FormItem,
   FormLabel,
-  FormControl,
   FormMessage,
 } from '@/components/ui/form';
 import { Input } from '@/components/ui/input';
+import { ServiceKey } from '@/shared/lib/constants';
+import {
+  ethGetTransactionReceipt,
+  ethSendTransaction,
+} from '@/shared/lib/eth-service';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { toast } from 'sonner';
 import { z, ZodError, ZodType } from 'zod';
-import { numberFormat } from '@/lib/number-format';
+import { numberFormat } from '@/shared/lib/helpers/number-format';
+import { transferTo } from '@/shared/lib/contract-service';
 
 const MakeTransactionSchema = z.object({
   receipt: z
@@ -100,14 +108,56 @@ type MakeTransactionDialogProps = {
   open: boolean;
   onOpenChange?: (open: boolean) => void;
   onClose?: () => void;
+  type: 'sepolia' | 'contract';
 };
 
 const MakeTransactionDialog = ({
   children,
-  onOpenChange,
   open,
+  type,
+  onOpenChange,
   onClose,
 }: MakeTransactionDialogProps) => {
+  const [isConfirmed, setIsConfirmed] = useState(false);
+
+  const { data, mutateAsync } = useMutation({
+    mutationKey: [ServiceKey.ETH_SEND_TRANSACTION],
+    mutationFn: ethSendTransaction,
+  });
+
+  const { error, mutateAsync: sendTXToContract } = useMutation({
+    mutationKey: [ServiceKey.SEND_TRANSACTION_TO_CONTRACT],
+    mutationFn: transferTo,
+  });
+
+  console.log(error);
+
+  useQuery({
+    queryKey: [ServiceKey.ETH_GET_TRANSACTION_RECEIPT],
+    queryFn: async () => {
+      const receipt = await ethGetTransactionReceipt(data as string);
+
+      if (receipt) {
+        queryClient.invalidateQueries({
+          queryKey: [ServiceKey.ETH_GET_BALANCE],
+        });
+        setIsConfirmed(true);
+      }
+
+      return receipt;
+    },
+    enabled: !!data,
+    refetchInterval: isConfirmed ? false : 1_000,
+  });
+
+  const queryClient = useQueryClient();
+  const address =
+    (
+      queryClient.getQueryData([
+        ServiceKey.ETH_REQUEST_ACCOUNTS,
+      ]) as Array<string> | null
+    )?.[0] || '';
+
   const form = useForm<MakeTransactionPayload, unknown, MakeTransactionPayload>(
     {
       defaultValues: {
@@ -123,7 +173,29 @@ const MakeTransactionDialog = ({
   const handleMakeTransaction: SubmitHandler<
     MakeTransactionPayload
   > = values => {
-    console.log(values);
+    const payload = {
+      from: address,
+      to: values.receipt,
+      value: values.amount,
+    };
+    onClose?.();
+    setIsConfirmed(false);
+
+    const toastOptions = {
+      loading: 'Sending transaction...',
+      success: () => {
+        return 'Transaction sent!';
+      },
+      error: 'Transaction failed!',
+    };
+
+    if (type === 'sepolia') {
+      queryClient.resetQueries({ queryKey: [ServiceKey.ETH_SEND_TRANSACTION] });
+
+      toast.promise(() => mutateAsync(payload), toastOptions);
+    } else {
+      toast.promise(() => sendTXToContract(payload), toastOptions);
+    }
   };
 
   return (
@@ -175,7 +247,7 @@ const MakeTransactionDialog = ({
               />
 
               <div className='mt-4 flex justify-end gap-2'>
-                <Button onClick={onClose} variant='outline'>
+                <Button onClick={onClose} variant='outline' type='button'>
                   Cancel
                 </Button>
                 <Button type='submit'>Confirm</Button>
